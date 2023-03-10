@@ -4,6 +4,7 @@ import time
 from pprint import pprint
 import discord
 import os
+import copy
 from config import settings
 import threading
 from datetime import datetime
@@ -36,7 +37,7 @@ class Repeater(discord.Client):
         self.not_ok_emoji = '❌'
 
     # Функция для получения последнего поста сообщества. Использует requests
-    def get_latest_post(self, group_id, get_photos=True):
+    def get_latest_post(self, group_id, get_photos=True, get_videos=True):
         # Параметры запроса для vk api
         params = {
             'access_token': self.settings['access_token'], 'url': 'https://api.vk.com/method/wall.get',
@@ -44,8 +45,13 @@ class Repeater(discord.Client):
             'client_id': self.api_acc_id, 'owner_id': group_id,
             'v': 5.131, 'extended': 1
         }
-        post = requests.get(params['url'], params).content
-        post = json.loads(post)['response']
+        post = json.loads(requests.get(params['url'], params).content)
+        # Если ответа нет
+        if 'response' in post:
+            post = post['response']
+        else:
+            return {'is_broken': True,
+                    'is_group': False}
         # От поста берутся только текст и фото, потому что я не знаю, как взять видео
         # Проверка на количество постов. Если постов 0, то, в некоторых случаях, дальнейшее действие останавливается.
         if len(post['items']) == 2:
@@ -53,57 +59,51 @@ class Repeater(discord.Client):
         elif len(post['items']) == 1:
             index = 0
         else:
-            return {'group_name': post['groups'][0]['name'],
-                    'is_broken': True}
-
+            return {'is_broken': True,
+                    'is_group': True}
         answer = {'text': post['items'][index]['text'],  # Результат работы функции, выраженной словарём
                   'photos': {},
                   'date': post['items'][index]['date'],
                   'group_name': post['groups'][0]['name'],
-                  'is_broken': False}
-        if get_photos:
-            # Проходимся по вложениям и ищем фотографии.
-            for counter in range(len(post['items'][index]['attachments'])):
-                # Если фотографии всё-таки есть, то сохраняем их.
-                if isinstance(post['items'][index]['attachments'][counter], dict) \
-                        and 'photo' in post['items'][index]['attachments'][counter].keys():
-                    # Тут выбирается url фотографии самого лучшего разрешения
-                    url_image = max(post['items'][index]['attachments'][counter]['photo']['sizes'],
-
-                                    key=lambda inspect_image: inspect_image['height'] * inspect_image['width'])['url']
-                    image = requests.get(url_image)  # Сама фотография, собственно
-                    name_new_file = f'images\content_image_{counter}_{answer["group_name"]}.png'
-                    with open(name_new_file, 'wb') as file:
-                        file.write(image.content)
-                        answer['photos'][name_new_file] = url_image
+                  'is_broken': False,
+                  'group_id': post['groups'][0]['id'],
+                  'is_group': True}
+        # Проходимся по вложениям и ищем фотографии.
+        for counter in range(len(post['items'][index]['attachments'])):
+            # Если фотографии всё-таки есть, то сохраняем их.
+            if get_photos and 'photo' in post['items'][index]['attachments'][counter]:
+                # Тут выбирается url фотографии самого лучшего разрешения
+                url_image = max(post['items'][index]['attachments'][counter]['photo']['sizes'],
+                                key=lambda inspect_image: inspect_image['height'] * inspect_image['width'])['url']
+                image = requests.get(url_image)  # Сама фотография, собственно
+                name_new_file = f'images\content_image_{counter}_{answer["group_id"]}.png'
+                with open(name_new_file, 'wb') as file:
+                    file.write(image.content)
+                    answer['photos'][name_new_file] = url_image
+            elif get_videos:
+                pass
 
         return answer
 
     # Функция, выполняемая в отдельном потоке, которая каждые cooldown секунд отправляет запросы сообществам VK и
     # рассылает новости каналам, которые на них подписаны.
     def check_news(self):
-        work_time = 1
+        work_time = 5
         while True:
             start = time.mktime(datetime.today().timetuple())
-            for channel in self.data:
+            for channel in {item: self.data[item].copy() for item in self.data}:
                 for group_id in self.data[channel]:
                     post_data = self.get_latest_post(group_id)
                     if not post_data['is_broken']:
                         # Если пост достаточно свеж (свежесть измеряется во времени, пост, чей возраст больше
-                        # cooldown + work_time * 1.5 (для подстраховки), считается не свежим),
+                        # cooldown + work_time * 1.4 (для подстраховки), считается не свежим),
                         # то мы его публикуем
                         now_date = time.mktime(datetime.today().timetuple())  # Текущая дата
-                        # print(f'Время, прошедшее с публикации поста - {now_date - post_data["date"]}')
-                        # print(f'Имя группы - {post_data["group_name"]}')
-                        # print(f'Допустимое время - {self.cooldown + int(work_time * 1.5)}')
-                        if now_date - post_data['date'] < self.cooldown + int(work_time * 1.5):
-                            # print('Публикуем')
+                        if now_date - post_data['date'] < self.cooldown + int(work_time * 1.42):
                             self.dispatch('found_news', channel, post_data)
                         else:
-                            # print('Не публикуем')
                             for photo in post_data['photos']:
                                 os.remove(photo)
-                        # print()
             end = time.mktime(datetime.today().timetuple())
             if end - start > 5:
                 work_time = end - start
@@ -112,11 +112,10 @@ class Repeater(discord.Client):
 
             time.sleep(self.cooldown)
 
-    # Реакция на событие запуска бота.
+    # Реакция на запуск бота.
     async def on_ready(self):
         # Открытие файла и запуск потока слежения за пабликами перенесены сюда, чтобы они начинались только тогда,
         # когда бот запустится.
-
         with open('data.json', 'rb') as start_data:
             load_data = json.load(start_data)
             self.data = {}
@@ -133,21 +132,35 @@ class Repeater(discord.Client):
 
     # Реакция на сообщение в каком-либо канале.
     async def on_message(self, message):
-        # Если команда состоит из 2-х слов и 2-ое - число, то:
-        if len(message.content.split()) == 2 and message.content.lower().split()[1].isdigit():
+        # Если команда состоит из 2-х или более слов и 2-ое - число, то:
+        if len(message.content.split()) >= 2 and message.content.lower().split()[1].isdigit():
             # Если пользователь - администратор, то выполняем команду
             if message.author.guild_permissions.administrator:
-                vk_public_id = int(-int(message.content.lower().split()[1]))  # ID VK паблика
-
+                vk_public_id = -abs(int(message.content.lower().split()[1]))  # ID VK паблика
                 # Добавление паблика в подписки
                 if message.content.lower().startswith(f'{settings["prefix"]}добавить'):
                     # Если данный канал ещё никуда не подписывался, то создаём для него массив
                     if message.channel not in self.data:
                         self.data[message.channel] = []
-                    # Если паблика ещё не добавляли, то добавляем
-                    if vk_public_id not in self.data[message.channel]:
+                    response = self.get_latest_post(vk_public_id)
+                    # Если паблика ещё не добавляли, паблик - группа и ответ апи не поломанный, то добавляем
+                    if vk_public_id not in self.data[message.channel] and \
+                            response['is_group'] and not response['is_broken']:
                         self.data[message.channel].append(vk_public_id)
-                    await message.add_reaction(self.ok_emoji)
+
+                        await message.add_reaction(self.ok_emoji)
+                    # Иначе - уведомляем об этом в частных случаях
+                    else:
+                        await message.add_reaction(self.not_ok_emoji)
+                        if vk_public_id in self.data[message.channel]:
+                            await message.channel.send(f"{message.author.mention}, этот канал уже подписан"
+                                                       f" на этот паблик!")
+                        elif not response['is_group']:
+                            await message.channel.send(f"{message.author.mention}, переданный ID не является"
+                                                       f"ID сообщества VK!")
+                        elif response['is_broken']:
+                            await message.channel.send(f"{message.author.mention}, сообщество не имеет постов"
+                                                       f" или произошёл внутренний сбой бота!")
 
                 # Удаление подписки на паблик
                 elif message.content.lower().startswith(f'{self.settings["prefix"]}удалить'):  # Удаление подписки
@@ -168,40 +181,51 @@ class Repeater(discord.Client):
 
         # Если же только 1, то проверяем, не %subscriptions ли это.
         elif message.content.lower().startswith(f'{self.settings["prefix"]}подписки'):
-            subscriptions = discord.Embed(title="Подписки этого канала:", color=self.embed_color)
-            names = []
-            for group_id in self.data.get(message.channel, []):
-                if group_id in self.groups_names:
-                    names.append(self.groups_names[group_id])
-                else:
-                    name = self.get_latest_post(group_id, get_photos=False)['group_name']
-                    names.append(name)
-                    self.groups_names[group_id] = name
+            await self.get_subscriptions(message.channel)
 
-            subscriptions.set_footer(text='\n'.join(
-                [f'{counter_id[0]}. {group_name} (ID={abs(counter_id[1])})' for counter_id, group_name in zip(
-                    enumerate(self.data.get(message.channel, []), start=1),
-                    names)]
-            ))
-            await message.channel.send(embed=subscriptions)
-            with open('groups_names.json', 'w') as common_group_names:
-                json.dump(self.groups_names, common_group_names)
-
+        # Команда получения помощи
         elif message.content.lower().startswith(f'{self.settings["prefix"]}помощь'):
             await self.help(message.channel)
+
+    # Получение подписок
+    def get_subscriptions(self, channel):
+        subscriptions = discord.Embed(title="Подписки этого канала:", color=self.embed_color)
+        names = []
+        for group_id in self.data.get(channel, []):
+            # Если имя такой группы уже есть в памяти, то просто получаем его оттуда
+            if group_id in self.groups_names:
+                names.append(self.groups_names[group_id])
+            # Если же нет, то отправляем новый запрос
+            else:
+                post_data = self.get_latest_post(group_id, get_photos=False, get_videos=False)
+                if not post_data['is_broken']:
+                    names.append(post_data['group_name'])
+                    self.groups_names[group_id] = post_data['group_name']
+
+        subscriptions.set_footer(text='\n'.join(
+            [f'{counter_id[0]}. {group_name} (ID={abs(counter_id[1])})' for counter_id, group_name in zip(
+                enumerate(self.data.get(channel, []), start=1),
+                names)]
+        ))
+        with open('groups_names.json', 'w') as common_group_names:
+            json.dump(self.groups_names, common_group_names)
+
+        return channel.send(embed=subscriptions)
 
     def help(self, channel):
         # Текст, который потом отправится
         text = ['Это Repeater-бот!',
                 'Этот бот пересылает посты из VK сообществ.',
-                'На данный момент, он НЕ пересылает видео (те, что из VK), а видео из YouTube, к сожалению, представляются простой ссылкой.',
-                'Список команд:',
-                f'{self.settings["prefix"]}добавить <id vk сообщества> - добавляет в подписки канала, из которого вызвали сообщение, переданное сообщество.',
-                f'{self.settings["prefix"]}удалить <vk group id> - удаляет переданное сообщество из подписок канала.',
-                f'{self.settings["prefix"]}подписки - список всех подписок канала, из которого вызывалась команда.',
-                f'{self.settings["prefix"]}помощь - справка о боте и том, как им пользоваться.',
+                'На данный момент, он НЕ пересылает видео (те, что из VK).',
+                'Список команд:\n',
+                f'{self.settings["prefix"]}добавить <id vk сообщества> - |ТРЕБУЮТСЯ ПРАВА АДМИНИСТРАТОРА|'
+                f' добавляет в подписки канала, из которого вызвали сообщение, переданное сообщество.\n',
+                f'{self.settings["prefix"]}удалить <vk group id> - |ТРЕБУЮТСЯ ПРАВА АДМИНИСТРАТОРА|'
+                f' удаляет переданное сообщество из подписок канала.\n',
+                f'{self.settings["prefix"]}подписки - список всех подписок канала, из которого вызывалась команда.\n',
+                f'{self.settings["prefix"]}помощь - справка о боте и том, как им пользоваться.\n',
                 'На данный момент бот находится в разработке, возможны баги и прочая муть.',
-                'Разработчик: Jagorrim#6537, просьба писать ему о всех ошибках и недочётах',
+                'Разработчик: Jagorrim#6537, просьба писать ему о всех ошибках и недочётах.',
                 'Также возможны перебои в работе бота из-за отсутствия постоянного хоста.']
         text_embed = discord.Embed(title="Привет,", color=self.embed_color)
         text_embed.set_footer(text='\n'.join(text))
@@ -243,6 +267,7 @@ class Repeater(discord.Client):
         except discord.errors.NotFound:
             del self.data[channel]
             self.save()
+        time.sleep(0.1)
         for photo in post_data['photos']:
             os.remove(photo)
 
@@ -251,6 +276,7 @@ if __name__ == '__main__':
     api_acc_id = '51451568'
     jumoreski = -92876084
     test = -218675277
+    my_id = 455961630
     bot_intents = discord.Intents.default()
     bot_intents.members = True
     bot_intents.presences = True
