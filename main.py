@@ -36,6 +36,17 @@ class Repeater(discord.Client):
         self.not_ok_emoji = '❌'
         self.length_limit = 2000
 
+    def get_video(self, owner_id, video_id):
+        params = {
+            'access_token': self.settings['access_token'], 'url': 'https://api.vk.com/method/video.get',
+            'count': 1,
+            'client_id': self.api_acc_id,
+            'videos': f'{owner_id}_{video_id}',
+            'v': 5.131
+        }
+        post = json.loads(requests.get(params['url'], params).content)
+        return post['response']['items'][0]['player']
+
     # Функция для получения последнего поста сообщества. Использует requests
     def get_latest_post(self, group_id, get_photos=True, get_videos=True):
         # Параметры запроса для vk api
@@ -46,12 +57,11 @@ class Repeater(discord.Client):
             'v': 5.131, 'extended': 1
         }
         post = json.loads(requests.get(params['url'], params).content)
-        # Если ответа нет
+        # pprint(post)
         if 'response' in post:
             post = post['response']
         else:
-            return {'is_broken': True,
-                    'is_group': False}
+            return {'is_broken': True, 'is_group': False}
         # От поста берутся только текст и фото, потому что я не знаю, как взять видео
         # Проверка на количество постов. Если постов 0, то, в некоторых случаях, дальнейшее действие останавливается.
         if len(post['items']) == 2:
@@ -59,15 +69,25 @@ class Repeater(discord.Client):
         elif len(post['items']) == 1:
             index = 0
         else:
-            return {'is_broken': True,
-                    'is_group': True}
+            return {'is_broken': True, 'is_group': False}
         answer = {'text': post['items'][index]['text'],  # Результат работы функции, выраженной словарём
                   'photos': {},
+                  'videos': [],
                   'date': post['items'][index]['date'],
-                  'group_name': post['groups'][0]['name'],
+                  'group_name': '',
                   'is_broken': False,
-                  'group_id': post['groups'][0]['id'],
+                  'group_id': post['items'][0]['owner_id'],
                   'is_group': True}
+
+        if post['groups']:
+            answer['group_name'] = post['groups'][0]['name']
+        else:
+            answer['group_name'] = f"{post['profiles'][0]['first_name']} {post['profiles'][0]['last_name']}"
+
+        if answer['group_id'] >= 0:
+            print('a')
+            return {'is_broken': False, 'is_group': False}
+
         # Проходимся по вложениям и ищем фотографии.
         for counter in range(len(post['items'][index]['attachments'])):
             # Если фотографии всё-таки есть, то сохраняем их.
@@ -80,36 +100,44 @@ class Repeater(discord.Client):
                 with open(name_new_file, 'wb') as file:
                     file.write(image.content)
                     answer['photos'][name_new_file] = url_image
-            elif get_videos:
-                pass
+            if get_videos and 'video' in post['items'][index]['attachments'][counter]:
+                video = post['items'][index]['attachments'][counter]['video']
+                owner_id = video['owner_id']
+                video_id = video['id']
+                video_url = self.get_video(owner_id, video_id)
+                answer['videos'].append(video_url)
 
         return answer
 
     # Функция, выполняемая в отдельном потоке, которая каждые cooldown секунд отправляет запросы сообществам VK и
     # рассылает новости каналам, которые на них подписаны.
     def check_news(self):
-        work_time = 5
+        work_time = 3
         while True:
             start = time.mktime(datetime.today().timetuple())
             for channel in {item: self.data[item].copy() for item in self.data}:
                 for group_id in self.data[channel]:
                     post_data = self.get_latest_post(group_id)
                     if not post_data['is_broken']:
-                        # Если пост достаточно свеж (свежесть измеряется во времени, пост, чей возраст больше
-                        # cooldown + work_time * 1.4 (для подстраховки), считается не свежим),
+                        # Если пост достаточно свеж (свежесть измеряется во времени, пост, чей возраст меньше
+                        # cooldown + work_time + 3 (тройка для подстраховки), считается свежим),
                         # то мы его публикуем
                         now_date = time.mktime(datetime.today().timetuple())  # Текущая дата
-                        if now_date - post_data['date'] < self.cooldown + int(work_time * 1.42):
+                        # print(f'limit - {work_time + 3 + self.cooldown}')
+                        # print(f'now_date - {now_date}')
+                        # print(f'post_date - {post_data["date"]}')
+                        # print(f'разница - {now_date - post_data["date"]}')
+                        # print()
+                        if now_date - post_data['date'] < self.cooldown + work_time + 1:
                             self.dispatch('found_news', channel, post_data)
                         else:
                             for photo in post_data['photos']:
                                 os.remove(photo)
             end = time.mktime(datetime.today().timetuple())
-            if end - start > 5:
+            if end - start > 3:
                 work_time = end - start
             else:
-                work_time = 5
-
+                work_time = 3
             time.sleep(self.cooldown)
 
     # Реакция на запуск бота.
@@ -132,39 +160,44 @@ class Repeater(discord.Client):
 
     # Реакция на сообщение в каком-либо канале.
     async def on_message(self, message):
-        # Если команда состоит из 2-х или более слов и 2-ое - число, то:
-        if len(message.content.split()) >= 2 and message.content.lower().split()[1].isdigit():
-            # Если пользователь - администратор, то выполняем команду
+        if message.content.lower().startswith(f'{self.settings["prefix"]}добавить'):
             if message.author.guild_permissions.administrator:
-                vk_public_id = -abs(int(message.content.lower().split()[1]))  # ID VK паблика
-                # Добавление паблика в подписки
-                if message.content.lower().startswith(f'{settings["prefix"]}добавить'):
+                if len(message.content.split()) >= 2 and message.content.lower().split()[1].isdigit():
+                    vk_public_id = -abs(int(message.content.lower().split()[1]))  # ID VK паблика
                     # Если данный канал ещё никуда не подписывался, то создаём для него массив
                     if message.channel not in self.data:
                         self.data[message.channel] = []
                     response = self.get_latest_post(vk_public_id)
                     # Если паблика ещё не добавляли, паблик - группа и ответ апи не поломанный, то добавляем
-                    if vk_public_id not in self.data[message.channel] and \
-                            response['is_group'] and not response['is_broken']:
+                    if vk_public_id not in self.data[message.channel] \
+                            and not response['is_broken'] and response['is_group']:
                         self.data[message.channel].append(vk_public_id)
-
                         await message.add_reaction(self.ok_emoji)
                     # Иначе - уведомляем об этом в частных случаях
                     else:
                         await message.add_reaction(self.not_ok_emoji)
                         if vk_public_id in self.data[message.channel]:
-                            await message.channel.send(f"{message.author.mention}, этот канал уже подписан"
-                                                       f" на этот паблик!")
+                            await message.channel.send(f"{message.author.mention}, этот канал уже подписан "
+                                                       f"на этот паблик!")
                         elif not response['is_group']:
-                            await message.channel.send(f"{message.author.mention}, переданный ID не является"
+                            await message.channel.send(f"{message.author.mention}, переданный ID не является "
                                                        f"ID сообщества VK!")
                         elif response['is_broken']:
-                            await message.channel.send(f"{message.author.mention}, сообщество не имеет постов"
-                                                       f" или произошёл внутренний сбой бота!")
+                            await message.channel.send(f"{message.author.mention}, сообщество не имеет постов!")
+                else:
+                    await message.add_reaction(self.not_ok_emoji)
+                    await message.channel.send(f'{message.author.mention}, ID сообщества не передано или не '
+                                               f'является числом')
+            else:
+                await message.add_reaction(self.not_ok_emoji)
+                await message.channel.send(f'{message.author.mention}, Вы не являетесь администратором!')
 
-                # Удаление подписки на паблик
-                elif message.content.lower().startswith(f'{self.settings["prefix"]}удалить'):  # Удаление подписки
-                    # Если паблик был в подписках, то удаляем
+        # Удаление подписки на паблик
+        elif message.content.lower().startswith(f'{self.settings["prefix"]}удалить'):  # Удаление подписки
+            if message.author.guild_permissions.administrator:
+                if len(message.content.split()) >= 2 and message.content.lower().split()[1].isdigit():
+                    vk_public_id = -abs(int(message.content.lower().split()[1]))  # ID VK паблика
+                    # Если паблик есть в подписках, то удаляем
                     if vk_public_id in self.data[message.channel]:
                         self.data[message.channel].remove(vk_public_id)
                         await message.add_reaction(self.ok_emoji)
@@ -173,8 +206,10 @@ class Repeater(discord.Client):
                         await message.add_reaction(self.not_ok_emoji)
                         await message.channel.send(f"{message.author.mention},"
                                                    f" этот канал не подписан на данное сообщество!")
-                self.save()
-            # Иначе - уведомляем об этом.
+                else:
+                    await message.add_reaction(self.not_ok_emoji)
+                    await message.channel.send(f'{message.author.mention}, ID сообщества не передано или не '
+                                               f'является числом')
             else:
                 await message.add_reaction(self.not_ok_emoji)
                 await message.channel.send(f'{message.author.mention}, Вы не являетесь администратором!')
@@ -186,6 +221,7 @@ class Repeater(discord.Client):
         # Команда получения помощи
         elif message.content.lower().startswith(f'{self.settings["prefix"]}помощь'):
             await self.help(message.channel)
+        self.save()
 
     # Получение подписок
     def get_subscriptions(self, channel):
@@ -216,17 +252,18 @@ class Repeater(discord.Client):
         # Текст, который потом отправится
         text = ['Это Repeater-бот!',
                 'Этот бот пересылает посты из VK сообществ.',
-                'На данный момент, он НЕ пересылает видео (те, что из VK).',
+                'Видео из VK приходят в виде ссылок на них.',
+                'Для получения ID сообщества можно использовать этот сайт - https://regvk.com/id/',
                 'Список команд:\n',
-                f'{self.settings["prefix"]}добавить <id vk сообщества> - |ТРЕБУЮТСЯ ПРАВА АДМИНИСТРАТОРА|'
+                f'{self.settings["prefix"]}добавить <id VK сообщества> - |ТРЕБУЮТСЯ ПРАВА АДМИНИСТРАТОРА|'
                 f' добавляет в подписки канала, из которого вызвали сообщение, переданное сообщество.\n',
-                f'{self.settings["prefix"]}удалить <vk group id> - |ТРЕБУЮТСЯ ПРАВА АДМИНИСТРАТОРА|'
+                f'{self.settings["prefix"]}удалить <id VK сообщества> - |ТРЕБУЮТСЯ ПРАВА АДМИНИСТРАТОРА|'
                 f' удаляет переданное сообщество из подписок канала.\n',
                 f'{self.settings["prefix"]}подписки - список всех подписок канала, из которого вызывалась команда.\n',
                 f'{self.settings["prefix"]}помощь - справка о боте и том, как им пользоваться.\n',
                 'На данный момент бот находится в разработке, возможны баги и прочая муть.',
                 'Разработчик: Jagorrim#6537, просьба писать ему о всех ошибках и недочётах.',
-                'Также возможны перебои в работе бота из-за отсутствия постоянного хоста.']
+                'Возможны перебои в работе бота из-за отсутствия постоянного хоста.']
         text_embed = discord.Embed(title="Привет,", color=self.embed_color)
         text_embed.set_footer(text='\n'.join(text))
         return channel.send(embed=text_embed)
@@ -261,28 +298,20 @@ class Repeater(discord.Client):
     async def on_found_news(self, channel, post_data):
         try:
             title = f"Новый пост от: {post_data['group_name']}""\n\n\n"
-            text = title + post_data['text']
-            counter = 4  # Счётчик звёздочек, использующихся для того, чтобы текст был жирным
+            videos = '\n\n' + '\n'.join(
+                [f'Видео №{counter} -  {url}' for counter, url in enumerate(post_data['videos'], start=1)]
+            )
+            text = title + post_data['text'] + videos
             while True:
                 # Если длина текста + 4 звёздочки больше лимита, то берём кусок текста, а не весь
                 if len(text) + 4 > self.length_limit:
-                    await channel.send("**" + text[0: self.length_limit - counter] + "**",
-                                       files=list(map(discord.File, post_data['photos'])))
+                    await channel.send("**" + text[0: self.length_limit - 4] + "**")
                     # Обрезаем текст
-                    text = text[self.length_limit - counter:]
-                    counter += 4
+                    text = text[self.length_limit - 4:]
                 else:
                     await channel.send("**" + text + "**",
                                        files=list(map(discord.File, post_data['photos'])))
                     break
-                # Другая версия, плохо работающая
-                # for point in range(0, len(text), self.length_limit):
-                #     if point + self.length_limit > len(text):
-                #         await channel.send(text[point: len(text)],
-                #                            files=list(map(discord.File, post_data['photos'])))
-                #     else:
-                #         await channel.send(text[point: point + self.length_limit],
-                #                            files=list(map(discord.File, post_data['photos'])))
         except discord.errors.NotFound:
             del self.data[channel]
             self.save()
