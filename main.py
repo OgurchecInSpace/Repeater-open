@@ -165,7 +165,7 @@ class Repeater(discord.Client):
     # Функция, выполняемая в отдельном потоке, которая каждые cooldown секунд отправляет запросы сообществам VK и
     # рассылает новости каналам, которые на них подписаны.
     def check_news(self):
-        work_time = 2
+        work_time = 1
         while True:
             start = time.mktime(datetime.today().timetuple())
             for channel in {item: self.data[item].copy() for item in self.data}:
@@ -173,7 +173,7 @@ class Repeater(discord.Client):
                     post_data = self.get_latest_post(subscription.group_id)
                     if not post_data['is_broken']:
                         # Если пост достаточно свеж (свежесть измеряется во времени, пост, чей возраст меньше
-                        # cooldown + work_time + 3 (тройка для подстраховки), считается свежим),
+                        # cooldown + work_time + 1 (1 для подстраховки), считается свежим),
                         # то мы его публикуем
                         now_date = time.mktime(datetime.today().timetuple())  # Текущая дата
                         if now_date - post_data['date'] < self.cooldown + work_time + 1:
@@ -182,10 +182,10 @@ class Repeater(discord.Client):
                             for photo in post_data['photos']:
                                 os.remove(photo)
             end = time.mktime(datetime.today().timetuple())
-            if end - start > 2:
+            if end - start > 1:
                 work_time = end - start
             else:
-                work_time = 2
+                work_time = 1
             time.sleep(self.cooldown)
 
     # Реакция на сообщение в каком-либо канале.
@@ -314,7 +314,13 @@ class Repeater(discord.Client):
             ping_text = subscription.ping
             if ping_text not in ['нет', '@everyone']:
                 # Если пинг не отсутствует и не предназначен для всех, значит, берём имя роли, которая пингуется
-                ping_text = channel.guild.get_role(int(ping_text[3:-1])).name
+                ping_text = channel.guild.get_role(int(ping_text[3:-1]))
+                # Если такая роль таки есть, значит, берём её имя
+                if ping_text is not None:
+                    ping_text = ping_text.name
+                # Иначе - уведомляем об этом
+                else:
+                    ping_text = 'удалённая роль'
             line = f'{counter}. {subscription.group_name} (ID={abs(subscription.group_id)}) ' \
                    f'(пинг={ping_text})'
             text.append(line)
@@ -400,10 +406,11 @@ class Repeater(discord.Client):
 
     # Реакция на событие присоединения к серверу
     async def on_guild_join(self, guild):
-        # Тут мы выбираем ПЕРВЫЙ и ТЕКСТОВЫЙ канал из всех каналов на сервере
-        channel = list(filter(lambda guild_channel:
-                              isinstance(guild_channel, discord.guild.TextChannel), guild.channels))[0]
-        await self.help(channel)
+        # Если на сервере есть каналы и среди них есть текстовые каналы,
+        # то отправляем в первый встречный канал информацию
+        if len(guild.channels) > 0 and discord.TextChannel in map(type, guild.channels):
+            channel = list(filter(lambda item: isinstance(item, discord.TextChannel), guild.channels))[0]
+            await self.help(channel)
 
     # Реакция на кик с сервера
     async def on_guild_remove(self, guild):
@@ -427,6 +434,9 @@ class Repeater(discord.Client):
             if videos:
                 text += '\n\n' + videos
             if ping != 'нет':
+                # Если пинг не для всех, то он точно пингует определённую роль, => надо проверить, что она есть
+                if ping != '@everyone' and guild.get_role(int(ping[3:-1])) is None:
+                    ping = '@удалённая роль'
                 text += '\n\n' + ping
             while True:
                 # Если длина текста + 4 звёздочки больше лимита, то берём кусок текста, а не весь
