@@ -57,7 +57,13 @@ class Repeater(discord.Client):
             'v': 5.131
         }
         post = json.loads(requests.get(params['url'], params).content)
-        return pyshorteners.Shortener().clckru.short(post['response']['items'][0]['player'])
+        try:
+            url = pyshorteners.Shortener(timeout=10).clckru.short(post['response']['items'][0]['player'])
+        except requests.exceptions.ReadTimeout:
+            url = 'Произошёл сбой в API'
+        except IndexError:
+            url = 'Видео не найдено'
+        return url
 
     # Функция для получения последнего поста сообщества. Использует requests
     def get_latest_post(self, group_id, get_photos=True, get_videos=True):
@@ -69,7 +75,6 @@ class Repeater(discord.Client):
             'v': 5.131, 'extended': 1
         }
         post = json.loads(requests.get(params['url'], params).content)
-        # pprint(post)
         if 'response' in post:
             post = post['response']
         else:
