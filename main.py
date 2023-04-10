@@ -7,7 +7,6 @@ import os
 from config import settings
 import threading
 from datetime import datetime
-import pyshorteners
 import pickle
 
 
@@ -36,7 +35,9 @@ class Subscription:
 class Repeater(discord.Client):
     def __init__(self, intents, allowed_mentions):
         super(Repeater, self).__init__(intents=intents, allowed_mentions=allowed_mentions)
-        self.cooldown = 30  # В секундах
+
+        self.min_cooldown = 20  # В секундах
+        self.min_work_time = 2
         self.embed_color = 0xffffff  # Белый
         self.api_acc_id = '51451568'
         self.jumoreski = -92876084
@@ -47,7 +48,11 @@ class Repeater(discord.Client):
         self.ok_emoji = '✅'
         self.not_ok_emoji = '❌'
         self.length_limit = 2000
+        # Адекватно кулдаун определяется в методе on_ready
+        # (когда запускается непосредственно бот и выгружаются данные из файла)
+        self.cooldown = 0
 
+    # Получение url VK видео
     def get_video_url(self, owner_id, video_id):
         params = {
             'access_token': self.settings['access_token'], 'url': 'https://api.vk.com/method/video.get',
@@ -58,11 +63,11 @@ class Repeater(discord.Client):
         }
         post = json.loads(requests.get(params['url'], params).content)
         try:
-            url = pyshorteners.Shortener(timeout=10).clckru.short(post['response']['items'][0]['player'])
-        except requests.exceptions.ReadTimeout:
-            url = 'Произошёл сбой в API'
+            url = post['response']['items'][0]['player']
         except IndexError:
             url = 'Видео не найдено'
+        except KeyError:
+            url = 'Сбой в API VK'
         return url
 
     # Функция для получения последнего поста сообщества. Использует requests
@@ -75,6 +80,8 @@ class Repeater(discord.Client):
             'v': 5.131, 'extended': 1
         }
         post = json.loads(requests.get(params['url'], params).content)
+        # pprint(post)
+
         if 'response' in post:
             post = post['response']
         else:
@@ -88,6 +95,7 @@ class Repeater(discord.Client):
         else:
             return {'is_broken': True, 'is_group': False}
         answer = {'text': post['items'][index]['text'],  # Результат работы функции, выраженной словарём
+                  'reposted_text': '',
                   'photos': {},
                   'videos': [],
                   'date': post['items'][index]['date'],
@@ -97,45 +105,30 @@ class Repeater(discord.Client):
                   'is_group': True}
         # Обыгрывание ситуации, когда в посте имеются гиперссылки
         if '[' in answer['text'] and ']' in answer['text'] and '|' in answer['text']:
-            text_index = 0
-            new_text = ''
-            while text_index < len(answer['text']):
-                # Если текущий символ - "[", а после него есть и "]", а между ними есть "|", то
-                # пробуем вычленить оттуда ссылку и текст, который замещает её
-                if '[' == answer['text'][text_index] and ']' in answer['text'][text_index:] and \
-                        '|' in answer['text'][text_index: answer['text'][text_index:].find(']') + 1 + text_index]:
-                    link_place = answer['text'][
-                                 text_index: answer['text'][text_index:].find(']') + 1 + text_index
-                                 ]
-                    link = link_place[1:link_place.find('|')]
-                    # Если ссылка НЕ имеет при себе префикса в виде сетевого протокола и домена вк (а такое может быть),
-                    # то добавляем их, чтобы ссылка была настоящей
-                    if 'https://vk.com/' not in link:
-                        link = 'hhtps://vk.com/' + link
-                    text = link_place[link_place.find('|') + 1: -1]
-
-                    new_text += f'{link} {text}'
-                    text_index += len(link_place)
-                else:
-                    new_text += answer['text'][text_index]
-                    text_index += 1
             # Заменяем текст на такой же, но с распарсенными гиперссылками
-            answer['text'] = new_text
+            answer['text'] = self.parse_hyperlinks(answer['text'])
 
         if post['groups']:
-            answer['group_name'] = post['groups'][0]['name']
+            answer['group_name'] = list(filter(lambda item: int(item['id']) == abs(int(group_id)),
+                                               post['groups']))[0]['name']
         else:
             answer['group_name'] = f"{post['profiles'][0]['first_name']} {post['profiles'][0]['last_name']}"
 
         if answer['group_id'] >= 0:
             return {'is_broken': False, 'is_group': False}
 
+        media = post['items'][index]['attachments'].copy()  # Список со всеми вложениями поста
+        # Если есть репосты, то сохраняем тексты и добавляем в список фотографий и видео фотографии и видео с репоста
+        if 'copy_history' in post['items'][index]:
+            answer['reposted_text'] = post['items'][index]['copy_history'][0]['text']
+            media += post['items'][index]['copy_history'][0]['attachments'].copy()
+
         # Проходимся по вложениям и ищем фотографии.
-        for counter in range(len(post['items'][index]['attachments'])):
+        for counter in range(len(media)):
             # Если фотографии всё-таки есть (и их надо брать), то сохраняем их.
-            if get_photos and 'photo' in post['items'][index]['attachments'][counter]:
+            if get_photos and 'photo' in media[counter]:
                 # Тут выбирается url фотографии самого лучшего разрешения
-                url_image = max(post['items'][index]['attachments'][counter]['photo']['sizes'],
+                url_image = max(media[counter]['photo']['sizes'],
                                 key=lambda inspect_image: inspect_image['height'] * inspect_image['width'])['url']
                 image = requests.get(url_image)  # Сама фотография, собственно
                 name_new_file = f'images\content_image_{counter}_{answer["group_id"]}.png'
@@ -143,8 +136,8 @@ class Repeater(discord.Client):
                     file.write(image.content)
                     answer['photos'][name_new_file] = url_image
             # Если есть видео, то забираем url их проигрывателя
-            if get_videos and 'video' in post['items'][index]['attachments'][counter]:
-                video = post['items'][index]['attachments'][counter]['video']
+            if get_videos and 'video' in media[counter]:
+                video = media[counter]['video']
                 owner_id = video['owner_id']
                 video_id = video['id']
                 video_url = self.get_video_url(owner_id, video_id)
@@ -152,7 +145,42 @@ class Repeater(discord.Client):
 
         return answer
 
-    # Реакция на запуск бота.
+    # Расчёт паузы между запросами
+    def get_cooldown(self):
+        subscriptions = []
+        for item in self.data:
+            subscriptions.extend(self.data[item])
+        return len(subscriptions) * self.min_cooldown
+
+    # Метод для парсинга ссылка с гиперссылками
+    @staticmethod
+    def parse_hyperlinks(post_text):
+        text_index = 0
+        new_text = ''
+        while text_index < len(post_text):
+            # Если текущий символ - "[", а после него есть и "]", а между ними есть "|", то
+            # пробуем вычленить оттуда ссылку и текст, который замещает её
+            if '[' == post_text[text_index] and ']' in post_text[text_index:] and \
+                    '|' in post_text[text_index: post_text[text_index:].find(']') + 1 + text_index]:
+                link_place = post_text[
+                             text_index: post_text[text_index:].find(']') + 1 + text_index
+                             ]
+                link = link_place[1:link_place.find('|')]
+                # Если ссылка НЕ имеет при себе префикса в виде сетевого протокола и домена вк (а такое может быть),
+                # то добавляем их, чтобы ссылка была настоящей
+                if not link.startswith('https://vk.com/'):
+                    link = 'https://vk.com/' + link
+                text = link_place[link_place.find('|') + 1: -1]
+
+                new_text += f'{link} {text}'
+                text_index += len(link_place)
+            else:
+                new_text += post_text[text_index]
+                text_index += 1
+        # Заменяем текст на такой же, но с распарсенными гиперссылками
+        return new_text
+
+    # Реакция на запуск бота
     async def on_ready(self):
         # Открытие файла и запуск потока слежения за пабликами перенесены сюда, чтобы они начинались только тогда,
         # когда бот запустится.
@@ -163,6 +191,7 @@ class Repeater(discord.Client):
                 load_channel = self.get_channel(int(channel_id))
                 if load_channel is not None:
                     self.data[load_channel] = load_data[channel_id].copy()
+        self.cooldown = self.get_cooldown()
         threading.Thread(target=self.check_news, name='checking').start()
         print(f'Loaded as {self.user}')  # Загрузка
         await self.change_presence(status=discord.Status.online, activity=discord.Game("не играет"))
@@ -170,7 +199,8 @@ class Repeater(discord.Client):
     # Функция, выполняемая в отдельном потоке, которая каждые cooldown секунд отправляет запросы сообществам VK и
     # рассылает новости каналам, которые на них подписаны.
     def check_news(self):
-        work_time = 1
+        self.cooldown = self.get_cooldown()
+        work_time = self.min_work_time
         while True:
             start = time.mktime(datetime.today().timetuple())
             for channel in {item: self.data[item].copy() for item in self.data}:
@@ -187,10 +217,10 @@ class Repeater(discord.Client):
                             for photo in post_data['photos']:
                                 os.remove(photo)
             end = time.mktime(datetime.today().timetuple())
-            if end - start > 1:
+            if end - start > self.min_work_time:
                 work_time = end - start
             else:
-                work_time = 1
+                work_time = self.min_work_time
             time.sleep(self.cooldown)
 
     # Реакция на сообщение в каком-либо канале.
@@ -436,6 +466,8 @@ class Repeater(discord.Client):
                 [f'Видео №{counter} -  {url}' for counter, url in enumerate(post_data['videos'], start=1)]
             )
             text = title + post_data['text']
+            if post_data['reposted_text']:
+                text += '\n' + 'Текст из репоста:' + '\n' + post_data['reposted_text']
             if videos:
                 text += '\n\n' + videos
             if ping != 'нет':
@@ -481,6 +513,7 @@ if __name__ == '__main__':
     bot_intents.members = True
     bot_intents.presences = True
     client = Repeater(intents=bot_intents, allowed_mentions=discord.AllowedMentions(everyone=True))
+    # pprint(client.get_latest_post(test))
     client.run(settings['token'])
 
 # В итоге храним self.data в файле pickle. Каналы в виде ID каналов, чтобы получить канал (при запуске бота), надо:
