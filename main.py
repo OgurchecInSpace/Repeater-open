@@ -95,7 +95,7 @@ class Repeater(discord.Client):
         else:
             return {'is_broken': True, 'is_group': False}
         answer = {'text': post['items'][index]['text'],  # Результат работы функции, выраженной словарём
-                  'reposted_text': '',
+                  'reposted_text': {},
                   'photos': {},
                   'videos': [],
                   'date': post['items'][index]['date'],
@@ -120,8 +120,12 @@ class Repeater(discord.Client):
         media = post['items'][index]['attachments'].copy()  # Список со всеми вложениями поста
         # Если есть репосты, то сохраняем тексты и добавляем в список фотографий и видео фотографии и видео с репоста
         if 'copy_history' in post['items'][index]:
-            answer['reposted_text'] = post['items'][index]['copy_history'][0]['text']
-            media += post['items'][index]['copy_history'][0]['attachments'].copy()
+            len_copy = len(post['items'][index]['copy_history'])
+            for repost_index in range(len_copy):
+                answer['reposted_text'][len_copy - repost_index] = \
+                    post['items'][index]['copy_history'][repost_index]['text']
+                if 'attachments' in post['items'][index]['copy_history'][repost_index]:
+                    media += post['items'][index]['copy_history'][repost_index]['attachments'].copy()
 
         # Проходимся по вложениям и ищем фотографии.
         for counter in range(len(media)):
@@ -143,6 +147,7 @@ class Repeater(discord.Client):
                 video_url = self.get_video_url(owner_id, video_id)
                 answer['videos'].append(video_url)
 
+        # pprint(post['items'][index])
         return answer
 
     # Расчёт паузы между запросами
@@ -203,7 +208,7 @@ class Repeater(discord.Client):
         work_time = self.min_work_time
         while True:
             start = time.mktime(datetime.today().timetuple())
-            for channel in {item: self.data[item].copy() for item in self.data}:
+            for channel in {item: self.data[item].copy() for item in self.data}:  # Такая запись нужная для глубокого копирования
                 for subscription in self.data[channel]:
                     post_data = self.get_latest_post(subscription.group_id)
                     if not post_data['is_broken']:
@@ -466,15 +471,25 @@ class Repeater(discord.Client):
                 [f'Видео №{counter} -  {url}' for counter, url in enumerate(post_data['videos'], start=1)]
             )
             text = title + post_data['text']
+
+            # Репосты
             if post_data['reposted_text']:
-                text += '\n' + 'Текст из репоста:' + '\n' + post_data['reposted_text']
+                for index in post_data['reposted_text']:
+                    text += '\n\n' + f'Текст из репоста №{index}:' + '\n\n' + post_data['reposted_text'][index]
+
+            # Ссылки на видео
             if videos:
                 text += '\n\n' + videos
+
+            # Пинги
             if ping != 'нет':
                 # Если пинг не для всех, то он точно пингует определённую роль, => надо проверить, что она есть
                 if ping != '@everyone' and guild.get_role(int(ping[3:-1])) is None:
                     ping = '@удалённая роль'
                 text += '\n\n' + ping
+
+            # Выводим текст, постепенно обрезая его на части (по 1996 символов + 4 "*" для стилизации,
+            # т.к. лимит в 2000 символов)
             while True:
                 # Если длина текста + 4 звёздочки больше лимита, то берём кусок текста, а не весь
                 if len(text) + 4 > self.length_limit:
