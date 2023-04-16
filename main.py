@@ -52,6 +52,7 @@ class Repeater(discord.Client):
         # (когда запускается непосредственно бот и выгружаются данные из файла)
         self.cooldown = 0
         self.count_breaks = 0  # Количество падений программы
+        self.start_checking = False
 
     # Получение url VK видео
     def get_video_url(self, owner_id, video_id):
@@ -198,19 +199,23 @@ class Repeater(discord.Client):
                 if load_channel is not None:
                     self.data[load_channel] = load_data[channel_id].copy()
         self.cooldown = self.get_cooldown()
-        threading.Thread(target=self.check_news, name='checking').start()
+        if not self.start_checking:
+            threading.Thread(target=self.check_news, name='checking').start()
+            self.start_checking = True
         print(f'Loaded as {self.user}')  # Загрузка
         await self.change_presence(status=discord.Status.online, activity=discord.Game("не играет"))
 
     # Функция, выполняемая в отдельном потоке, которая каждые cooldown секунд отправляет запросы сообществам VK и
     # рассылает новости каналам, которые на них подписаны.
     def check_news(self):
+        # Если всё в порядке
         try:
             self.cooldown = self.get_cooldown()
             work_time = self.min_work_time
             while True:
                 start = time.mktime(datetime.today().timetuple())
-                for channel in {item: self.data[item].copy() for item in self.data}:  # Такая запись нужная для глубокого копирования
+                for channel in {item: self.data[item].copy() for item in
+                                self.data}:  # Такая запись нужная для глубокого копирования
                     for subscription in self.data[channel]:
                         post_data = self.get_latest_post(subscription.group_id)
                         if not post_data['is_broken']:
@@ -230,11 +235,13 @@ class Repeater(discord.Client):
                     work_time = self.min_work_time
                 time.sleep(self.cooldown)
                 self.count_breaks = 0
+        # Если появляется какое-либо исключение
+        # (в методе get_latest_post иногда поднимались исключения, связанные с подключением)
         except Exception as error:
-            threading.Thread(target=self.check_news).start()
+            threading.Thread(target=self.check_news).start()  # Создаём новый поток слежения за группами
             self.count_breaks += 1
             if self.count_breaks >= 5:
-                print('Что-то не так')
+                print('Что-то не так:')
                 print(error)
 
     # Реакция на сообщение в каком-либо канале.
@@ -524,6 +531,7 @@ class Repeater(discord.Client):
         with open('data.pickle', 'wb') as file:
             dumped_data = {}
             for channel in self.data:
+                # Сохраняем каналы в виде их ID
                 dumped_data[int(channel.id)] = self.data[channel].copy()
             pickle.dump(dumped_data, file)
 
