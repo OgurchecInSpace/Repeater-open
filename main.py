@@ -51,6 +51,7 @@ class Repeater(discord.Client):
         # Адекватно кулдаун определяется в методе on_ready
         # (когда запускается непосредственно бот и выгружаются данные из файла)
         self.cooldown = 0
+        self.count_breaks = 0  # Количество падений программы
 
     # Получение url VK видео
     def get_video_url(self, owner_id, video_id):
@@ -204,29 +205,37 @@ class Repeater(discord.Client):
     # Функция, выполняемая в отдельном потоке, которая каждые cooldown секунд отправляет запросы сообществам VK и
     # рассылает новости каналам, которые на них подписаны.
     def check_news(self):
-        self.cooldown = self.get_cooldown()
-        work_time = self.min_work_time
-        while True:
-            start = time.mktime(datetime.today().timetuple())
-            for channel in {item: self.data[item].copy() for item in self.data}:  # Такая запись нужная для глубокого копирования
-                for subscription in self.data[channel]:
-                    post_data = self.get_latest_post(subscription.group_id)
-                    if not post_data['is_broken']:
-                        # Если пост достаточно свеж (свежесть измеряется во времени, пост, чей возраст меньше
-                        # cooldown + work_time + 1 (1 для подстраховки), считается свежим),
-                        # то мы его публикуем
-                        now_date = time.mktime(datetime.today().timetuple())  # Текущая дата
-                        if now_date - post_data['date'] < self.cooldown + work_time + 1:
-                            self.dispatch('found_news', channel, post_data, subscription.ping, channel.guild)
-                        else:
-                            for photo in post_data['photos']:
-                                os.remove(photo)
-            end = time.mktime(datetime.today().timetuple())
-            if end - start > self.min_work_time:
-                work_time = end - start
-            else:
-                work_time = self.min_work_time
-            time.sleep(self.cooldown)
+        try:
+            self.cooldown = self.get_cooldown()
+            work_time = self.min_work_time
+            while True:
+                start = time.mktime(datetime.today().timetuple())
+                for channel in {item: self.data[item].copy() for item in self.data}:  # Такая запись нужная для глубокого копирования
+                    for subscription in self.data[channel]:
+                        post_data = self.get_latest_post(subscription.group_id)
+                        if not post_data['is_broken']:
+                            # Если пост достаточно свеж (свежесть измеряется во времени, пост, чей возраст меньше
+                            # cooldown + work_time + 1 (1 для подстраховки), считается свежим),
+                            # то мы его публикуем
+                            now_date = time.mktime(datetime.today().timetuple())  # Текущая дата
+                            if now_date - post_data['date'] < self.cooldown + work_time + 1:
+                                self.dispatch('found_news', channel, post_data, subscription.ping, channel.guild)
+                            else:
+                                for photo in post_data['photos']:
+                                    os.remove(photo)
+                end = time.mktime(datetime.today().timetuple())
+                if end - start > self.min_work_time:
+                    work_time = end - start
+                else:
+                    work_time = self.min_work_time
+                time.sleep(self.cooldown)
+                self.count_breaks = 0
+        except Exception as error:
+            threading.Thread(target=self.check_news).start()
+            self.count_breaks += 1
+            if self.count_breaks >= 5:
+                print('Что-то не так')
+                print(error)
 
     # Реакция на сообщение в каком-либо канале.
     async def on_message(self, message):
